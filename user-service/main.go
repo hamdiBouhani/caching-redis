@@ -18,6 +18,7 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 
 	cache := NewCache(rdb)
+	limiter := NewRateLimiter(rdb)
 	pub := NewPublisher(rdb)
 	q := NewQueue(rdb)
 	srv := NewServer(cache, pub, q)
@@ -48,8 +49,16 @@ func main() {
 	})
 
 	// Routes
-	router.GET("/user", srv.GetUser)
-	router.POST("/user/update", srv.UpdateUser)
+
+	api := router.Group("/api")
+	api.Use(RateLimitMiddleware(limiter,
+		func(c *gin.Context) string { return c.ClientIP() }, // or user ID
+		100, time.Minute,
+	))
+	{
+		api.GET("/user", srv.GetUser)
+		api.POST("/user/update", srv.UpdateUser)
+	}
 
 	// --- Graceful shutdown ---
 	srvHTTP := &http.Server{
@@ -79,4 +88,19 @@ func main() {
 		log.Printf("redis close error: %v", err)
 	}
 	log.Println("bye")
+}
+
+func healthHandler(rdb *redis.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "unhealthy",
+				"error":  err.Error(),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }

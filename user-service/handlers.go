@@ -3,10 +3,41 @@ package main
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// RateLimitMiddleware applies a per-key sliding-window limit.
+// keyFn decides which key to use (user ID, IP, API key, etc.).
+func RateLimitMiddleware(rl *RateLimiter, keyFn func(*gin.Context) string, limit int, window time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := "ratelimit:" + keyFn(c)
+
+		res, err := rl.Allow(c.Request.Context(), key, limit, window)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "ratelimit error"})
+			return
+		}
+
+		c.Header("X-RateLimit-Limit", strconv.Itoa(limit))
+		c.Header("X-RateLimit-Remaining", strconv.Itoa(res.Remaining))
+		c.Header("X-RateLimit-Reset", strconv.FormatInt(res.ResetAt.Unix(), 10))
+
+		if !res.Allowed {
+			c.Header("Retry-After", strconv.FormatInt(
+				int64(time.Until(res.ResetAt).Seconds())+1, 10))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error":    "rate limited",
+				"reset_at": res.ResetAt.Format(time.RFC3339),
+			})
+			return
+		}
+
+		c.Next()
+	}
+}
 
 type Server struct {
 	cache     *Cache
